@@ -37,8 +37,15 @@ Needs [Stack](https://docs.haskellstack.org/). Everything else is pinned by
 ```sh
 stack build          # library, executable and tests
 stack test           # 122 examples
-stack exec proxy-tool
+stack exec proxy-tool     # run it from inside this directory
+stack install             # copy it onto PATH, so `proxy-tool` works anywhere
 ```
+
+`stack install` copies the executable to Stack's local-bin — `stack path
+--local-bin` prints the directory, and Stack's own installer normally puts it
+on PATH. It is a copy, not a link: after changing the source, run `stack
+install` again or the command keeps the old build. Everything below assumes
+that copy exists; without it, `proxy-tool` resolves only under `stack exec`.
 
 ## Use
 
