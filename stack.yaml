@@ -1,0 +1,36 @@
+# Stack configuration for proxy-tool.
+#
+# lts-24.46 pins GHC 9.10.3 and supplies every dependency, including the
+# Windows terminal backend (brick -> vty-crossplatform -> vty-windows).
+snapshot: lts-24.46
+
+packages:
+  - .
+
+# Why "$everything: -w".
+#
+# GHC writes its diagnostics with U+2022 bullets and U+2018/2019 smart quotes.
+# Stack reads a dependency's compiler output and re-emits it on its own stderr,
+# which is encoded with the machine's ANSI code page.  On a Windows box whose
+# code page cannot represent those characters (936/GBK here, but 1252 has the
+# same hole), that re-emission throws
+#
+#     <stderr>: commitAndReleaseBuffer: invalid argument
+#               (cannot encode character '\8226')
+#
+# and the whole build plan aborts partway through -- in this project's case
+# while compiling vty, whose -Wx-partial warning happens to contain a bullet.
+#
+# Warnings from snapshot packages are not actionable here, so turning them off
+# removes the offending text at its source and makes the build deterministic
+# regardless of the host code page.  The per-package entry below then puts the
+# full warning set back for this package's own code, because package-specific
+# options are applied after "$everything".
+ghc-options:
+  "$everything": -w
+  proxy-tool: >-
+    -Wall
+    -Wcompat
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wredundant-constraints

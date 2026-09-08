@@ -1,0 +1,24 @@
+# CodeEraser config for proxy-tool.
+#
+# It declares NO threshold overrides on purpose. The shipped §4.1
+# defaults judge this tree, so the PreToolUse hook denies at exactly
+# the line `ce check` would fail at; a project-local number here would
+# let the edit that broke a budget pick its own budget.
+#
+# KNOWN DEBT, recorded rather than legislated away — two modules are
+# already past the default 750-line hard budget:
+#
+#     src/ProxyTool/TUI.hs        879
+#     src/ProxyTool/Translate.hs  777
+#
+# so the next Write/Edit to either is denied (guard/budget.rs judges
+# post-write absolute size: `lines > cap`, no grandfathering for
+# existing files). The repayment is splitting them — TUI.hs holds the
+# form model, the event loop and the renderers in one module, and
+# Translate.hs holds both stream directions. Raising the number here
+# would only hide the measurement.
+#
+# The stack build tree (.stack-work/, 188 MB of generated artifacts)
+# needs no `exclude` line: the walk is built on the `ignore` crate
+# with gitignore honoured (scan/walk.rs:141-142), and .gitignore
+# already covers it.

@@ -1,0 +1,99 @@
+cabal-version:      3.0
+name:               proxy-tool
+version:            0.1.0.0
+synopsis:           TUI launcher and protocol-translating proxy for CLI coding agents
+description:
+  proxy-tool points CLI coding agents (Claude Code, Codex, Kimi Code, ...) at
+  arbitrary model providers.  It ships a terminal UI for editing
+  provider / base URL / model / effort, and a local HTTP proxy that rewrites
+  and, where the wire protocols differ, translates requests on the way through.
+license:            BSD-3-Clause
+author:             skymanbp
+maintainer:         skyman.bp@gmail.com
+build-type:         Simple
+extra-source-files: README.md
+
+common warnings
+    ghc-options: -Wall -Wcompat -Wincomplete-record-updates
+                 -Wincomplete-uni-patterns -Wredundant-constraints
+
+library
+    import:           warnings
+    hs-source-dirs:   src
+    exposed-modules:  ProxyTool.Types
+                      ProxyTool.I18n
+                      ProxyTool.Config
+                      ProxyTool.Launch
+                      ProxyTool.Proxy
+                      ProxyTool.Session
+                      ProxyTool.Translate
+                      ProxyTool.TUI
+    build-depends:    base                 >=4.14 && <5
+                    , aeson                >=2.1  && <2.3
+                    , aeson-pretty
+                    , brick                >=2.0  && <3
+                    , bytestring
+                    , case-insensitive
+                    , containers
+                    , directory
+                    , filepath
+                    , http-client
+                    , http-client-tls
+                    , http-types
+                    , microlens
+                    , microlens-mtl
+                    , mtl
+                    , network
+                    , process
+                    , random
+                    , scientific
+                    , stm
+                    , text
+                    , text-zipper
+                    , time
+                    , transformers
+                    , vector
+                    , vty
+                    , vty-crossplatform
+                    , wai
+                    , warp
+    default-language: GHC2021
+
+executable proxy-tool
+    import:           warnings
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N"
+    build-depends:    base
+                    , proxy-tool
+                    , aeson
+                    , bytestring
+                    , directory
+                    , text
+    -- Only to put the console into the UTF-8 code page: without it a Chinese
+    -- interface throws instead of printing on a machine whose code page
+    -- cannot encode the characters.  See withConsoleCodePage in Main.
+    if os(windows)
+        build-depends: Win32
+    default-language: GHC2021
+
+test-suite proxy-tool-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    TranslateSpec
+                      ConfigSpec
+                      LaunchSpec
+                      I18nSpec
+    ghc-options:      -threaded
+    build-depends:    base
+                    , proxy-tool
+                    , aeson
+                    , bytestring
+                    , containers
+                    , hspec
+                    , scientific
+                    , text
+                    , vector
+    default-language: GHC2021

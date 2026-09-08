@@ -1,0 +1,32 @@
+# === Haskell / stack build output ===
+.stack-work/
+dist-newstyle/
+*.hi
+*.o
+cabal.project.local
+
+# === OS / editor ===
+Thumbs.db
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# === CodeEraser per-project index ===
+.ce/
+
+# === cc-memory session handoff state (machine-local, not content) ===
+# MEMORY/PROGRESS.md and memory.db are this machine's handoff state,
+# not project content. ANCHORED with a leading slash on purpose: a
+# bare ".ccm/" would also hide a stray <subdir>/.ccm/ from
+# `git status`, which is exactly how a SQLite db rides into a commit.
+/.ccm/
+
+# === Claude Code per-machine session config ===
+/.claude/
+
+# === Runtime config: proxy-tool's config.json carries provider tokens ===
+# The real one lives in the XDG config dir (Config.hs:270-275), never
+# in the tree — but PROXY_TOOL_CONFIG can point anywhere, so a copy
+# dropped at the root must not be committable.
+/config.json
