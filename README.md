@@ -68,6 +68,35 @@ without starting anything. Credentials are masked in both.
 Config lives in the platform config directory (`proxy-tool/config.json`);
 `PROXY_TOOL_CONFIG` overrides the path.
 
+## Adding a provider
+
+Any OpenAI- or Anthropic-compatible endpoint works. In the TUI, `n` opens an
+empty provider form and `e` edits the selected one; the rows are label,
+dialect, base URL, key, model, fast model, effort, extra headers and extra
+body. Enter saves, `s` writes the config.
+
+The key row understands `env:NAME`, which stores only the variable's name —
+prefer it. Anything else is stored as the credential itself, in a file that is
+created owner-only but is still plaintext.
+
+Dialect is what the *endpoint* speaks, not what the agent speaks. Point Claude
+Code at an `openai-chat` provider and the proxy translates; point Codex at one
+and it connects straight through. `plan` prints which of the two you got before
+anything launches.
+
+`extra_body` is the row that makes unusual endpoints usable, because some of
+them do things no dialect describes. Venice, for instance, injects its own
+system prompt into every request unless you say otherwise — around 1600 tokens
+that both cost money and argue with the agent's own instructions. One line in
+`extra_body` turns it off:
+
+```json
+{"venice_parameters": {"include_venice_system_prompt": false}}
+```
+
+Editing a provider in the TUI round-trips this field as compact JSON, so
+changing the model later does not silently drop it.
+
 ## Language
 
 The interface is **English by default and switchable to Chinese** — `L` in the
