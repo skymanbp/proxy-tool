@@ -8,8 +8,10 @@ description:
   provider / base URL / model / effort, and a local HTTP proxy that rewrites
   and, where the wire protocols differ, translates requests on the way through.
 license:            BSD-3-Clause
+license-file:       LICENSE
+copyright:          (c) 2026 skymanbp
 author:             skymanbp
-maintainer:         skyman.bp@gmail.com
+maintainer:         57272723+skymanbp@users.noreply.github.com
 build-type:         Simple
 extra-source-files: README.md
 
