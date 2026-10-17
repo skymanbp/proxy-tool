@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               proxy-tool
-version:            0.1.0.0
+version:            0.2.0.0
 synopsis:           TUI launcher and protocol-translating proxy for CLI coding agents
 description:
   proxy-tool points CLI coding agents (Claude Code, Codex, Kimi Code, ...) at
@@ -66,6 +66,9 @@ executable proxy-tool
     import:           warnings
     hs-source-dirs:   app
     main-is:          Main.hs
+    -- the one version string: --version reads it from the cabal-generated Paths module
+    other-modules:    Paths_proxy_tool
+    autogen-modules:  Paths_proxy_tool
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N"
     build-depends:    base
                     , proxy-tool

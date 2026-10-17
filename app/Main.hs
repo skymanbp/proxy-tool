@@ -28,8 +28,10 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BLC
 import Data.List (isPrefixOf)
 import Data.Text (Text)
+import Data.Version (showVersion)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import Paths_proxy_tool (version)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitWith)
 import System.IO
@@ -143,7 +145,7 @@ run lang path cfg = \case
   ("serve-stop" : rest) -> serveStopCmd lang rest
   ["--help"]         -> TIO.putStrLn (usageText lang)
   ["-h"]             -> TIO.putStrLn (usageText lang)
-  ["--version"]      -> TIO.putStrLn "proxy-tool 0.1.0.0"
+  ["--version"]      -> TIO.putStrLn ("proxy-tool " <> T.pack (showVersion version))
   args               -> dieWithUsage lang (MsgUnrecognisedArgs
                                              (T.unwords (map T.pack args)))
 
