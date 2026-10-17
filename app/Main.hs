@@ -12,9 +12,21 @@
 -- library returns 'Msg' values and this module decides how to say them.
 module Main (main) where
 
-import Control.Exception (SomeException, bracket, try)
-import Control.Monad (void)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, takeMVar, tryPutMVar)
+import Control.Exception
+  ( AsyncException (UserInterrupt)
+  , IOException
+  , SomeException
+  , bracket
+  , handle
+  , throwIO
+  , try
+  )
+import Control.Monad (unless, void, when)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BLC
+import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -22,16 +34,21 @@ import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitWith)
 import System.IO
   ( BufferMode (LineBuffering)
+  , hSetBinaryMode
   , hSetBuffering
   , hSetEncoding
   , stderr
+  , stdin
   , stdout
   , utf8
   )
 
 #if defined(mingw32_HOST_OS)
+import qualified GHC.ConsoleHandler as Console
 import System.Win32.Console (getConsoleOutputCP, setConsoleOutputCP)
 import System.Win32.Types (UINT)
+#else
+import qualified System.Posix.Signals as Signals
 #endif
 
 import ProxyTool.Config
@@ -122,6 +139,8 @@ run lang path cfg = \case
   ["config", "init"] -> initConfig lang path cfg
   ("plan" : rest)    -> withPair lang cfg rest (planCmd lang)
   ("run"  : rest)    -> withPair lang cfg rest (runCmd lang)
+  ("serve" : rest)   -> serveCmd lang cfg rest
+  ("serve-stop" : rest) -> serveStopCmd lang rest
   ["--help"]         -> TIO.putStrLn (usageText lang)
   ["-h"]             -> TIO.putStrLn (usageText lang)
   ["--version"]      -> TIO.putStrLn "proxy-tool 0.1.0.0"
@@ -240,6 +259,127 @@ runCmd lang a p cfg =
   runSession (TIO.hPutStrLn stderr . ("[proxy-tool] " <>)) cfg a p >>= \case
     Left err  -> die lang err
     Right out -> exitWith (soExit out)
+
+-- ---------------------------------------------------------------------------
+-- serve
+-- ---------------------------------------------------------------------------
+
+data ServeArgs = ServeArgs
+  { saProvider :: Text
+  , saPort     :: Int
+  , saTokenEnv :: Text
+  , saStdinEof :: Bool
+  }
+
+-- | @serve PROVIDER --port N --token-env NAME [--exit-on-stdin-eof]@.
+--
+-- The port is required and fixed: a standing proxy is found by whoever
+-- started it at a known address, so an OS-chosen port would be unreachable.
+-- The token is named, never given: a value on the command line would be
+-- visible to every process that can list command lines.
+parseServeArgs :: [String] -> Either Msg ServeArgs
+parseServeArgs = go Nothing Nothing Nothing False
+  where
+    go (Just p) (Just n) (Just e) s [] = Right (ServeArgs p n e s)
+    go _ _ _ _ [] = Left MsgServeExpected
+    go _ _ _ _ ["--port"] = Left MsgServeExpected
+    go _ _ _ _ ["--token-env"] = Left MsgServeExpected
+    go p _ e s ("--port" : v : xs) = case reads v of
+      [(n, "")] | n >= 1 && n <= 65535 -> go p (Just n) e s xs
+      _ -> Left (MsgServeBadPort (T.pack v))
+    go p n _ s ("--token-env" : v : xs)
+      | not (null v) = go p n (Just (T.pack v)) s xs
+      | otherwise    = Left MsgServeExpected
+    go p n e _ ("--exit-on-stdin-eof" : xs) = go p n e True xs
+    go Nothing n e s (x : xs)
+      | not ("--" `isPrefixOf` x) = go (Just (T.pack x)) n e s xs
+    go _ _ _ _ (x : _) = Left (MsgUnexpectedArg (T.pack x))
+
+serveCmd :: Lang -> Config -> [String] -> IO ()
+serveCmd lang cfg rest = case parseServeArgs rest of
+  Left err -> dieWithUsage lang err
+  Right sa -> case findProvider (saProvider sa) cfg of
+    Nothing -> die lang (MsgNoSuchProvider (saProvider sa))
+    Just p -> tokenFromEnv (saTokenEnv sa) >>= \case
+      Left err -> die lang err
+      Right token -> do
+        stop <- newEmptyMVar
+        let fire = void (tryPutMVar stop ())
+        installStopHandlers fire
+        when (saStdinEof sa) (void (forkIO (drainStdin >> fire)))
+        serveSession logLine cfg p (saPort sa) token (const (pure ())) fire
+                     (waitForStop (takeMVar stop)) >>= \case
+          Left err -> die lang err
+          Right () -> exitWith ExitSuccess
+  where
+    logLine = TIO.hPutStrLn stderr . ("[proxy-tool] " <>)
+
+-- | @serve-stop --port N --token-env NAME@: stop a standing proxy that has
+-- no console to send Ctrl-C to (one a supervisor started detached), through
+-- its authorised @POST \/admin\/shutdown@.  Exit 0 once the port has gone
+-- quiet; 1 when the proxy could not be stopped (nothing listening, the
+-- token refused, still answering); 2 for a wrong command line or an unset
+-- token variable.
+serveStopCmd :: Lang -> [String] -> IO ()
+serveStopCmd lang rest = case parse Nothing Nothing rest of
+  Left err -> dieWithUsage lang err
+  Right (port, envName) -> tokenFromEnv envName >>= \case
+    Left err -> die lang err
+    Right token -> stopServe port token >>= \case
+      Right () -> do
+        TIO.putStrLn (render lang (MsgServeStopDone port))
+        exitWith ExitSuccess
+      Left err -> do
+        TIO.hPutStrLn stderr (render lang err)
+        exitWith (ExitFailure 1)
+  where
+    parse (Just p) (Just e) [] = Right (p, e)
+    parse _ _ [] = Left MsgServeStopExpected
+    parse _ e ("--port" : v : xs) = case reads v of
+      [(n, "")] | n >= 1 && n <= 65535 -> parse (Just n) e xs
+      _ -> Left (MsgServeBadPort (T.pack v))
+    parse p _ ("--token-env" : v : xs)
+      | not (null v) = parse p (Just (T.pack v)) xs
+    parse _ _ (x : _) = Left (MsgUnexpectedArg (T.pack x))
+
+-- | Block until stopped.  The stop handlers below fill the MVar; a Ctrl-C
+-- that reaches the main thread as the RTS's own 'UserInterrupt' (before the
+-- handlers are installed, or on a runtime that delivers it that way) is the
+-- same request to stop, so it ends the wait instead of the process -- the
+-- proxy is then closed by 'serveSession' and the exit status is 0.
+waitForStop :: IO () -> IO ()
+waitForStop wait = handle onAsync wait
+  where
+    onAsync UserInterrupt = pure ()
+    onAsync e             = throwIO e
+
+-- | Read stdin to its end, then return (@--exit-on-stdin-eof@).
+--
+-- Opt-in, because a supervisor that wants the proxy to outlive it starts it
+-- with stdin on the null device, which is at end-of-file immediately.  A read
+-- error means stdin is gone too, so it ends the wait the same way.
+drainStdin :: IO ()
+drainStdin = void (try loop :: IO (Either IOException ()))
+  where
+    loop = do
+      hSetBinaryMode stdin True
+      let go = do
+            chunk <- BS.hGetSome stdin 4096
+            unless (BS.null chunk) go
+      go
+
+-- | Turn the platform's stop signals into one stop request: Ctrl-C,
+-- Ctrl-Break, console close, logoff and shutdown on Windows; SIGINT and
+-- SIGTERM elsewhere.
+installStopHandlers :: IO () -> IO ()
+#if defined(mingw32_HOST_OS)
+installStopHandlers fire =
+  void (Console.installHandler (Console.Catch (const fire)))
+#else
+installStopHandlers fire = do
+  void (Signals.installHandler Signals.sigINT (Signals.Catch fire) Nothing)
+  void (Signals.installHandler Signals.sigTERM (Signals.Catch fire) Nothing)
+#endif
 
 -- ---------------------------------------------------------------------------
 -- doctor

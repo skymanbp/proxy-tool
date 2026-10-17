@@ -5,6 +5,7 @@ import Test.Hspec
 import qualified ConfigSpec
 import qualified I18nSpec
 import qualified LaunchSpec
+import qualified ServeSpec
 import qualified TranslateSpec
 
 main :: IO ()
@@ -13,3 +14,4 @@ main = hspec $ do
   describe "ProxyTool.Config"    ConfigSpec.spec
   describe "ProxyTool.Launch"    LaunchSpec.spec
   describe "ProxyTool.I18n"      I18nSpec.spec
+  describe "ProxyTool.Serve"     ServeSpec.spec

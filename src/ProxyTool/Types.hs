@@ -234,6 +234,12 @@ data Provider = Provider
   , provExtraBody :: Maybe Object
     -- ^ Raw JSON merged into every upstream request body.  The escape hatch
     -- for provider knobs this tool does not model.
+  , provManagedBy :: Maybe Text
+    -- ^ Name of the program that generates this entry (@managed_by@), when a
+    -- program does: such an entry is rewritten by its owner, and a person
+    -- editing it in the TUI takes it over (the form builds a fresh provider,
+    -- which carries no owner).  Carried through load and save untouched so
+    -- that saving the config from the TUI does not silently disown it.
   } deriving (Eq, Show)
 
 emptyProvider :: Provider
@@ -248,10 +254,13 @@ emptyProvider = Provider
   , provEffort    = Nothing
   , provHeaders   = []
   , provExtraBody = Nothing
+  , provManagedBy = Nothing
   }
 
 instance ToJSON Provider where
-  toJSON p = object
+  -- @managed_by@ is written only when set, so a config that never had an
+  -- owned entry saves byte-for-byte as it did before the field existed.
+  toJSON p = object $
     [ "id"         .= provId p
     , "label"      .= provLabel p
     , "wire"       .= provWire p
@@ -262,7 +271,7 @@ instance ToJSON Provider where
     , "effort"     .= provEffort p
     , "headers"    .= map namedPair (provHeaders p)
     , "extra_body" .= provExtraBody p
-    ]
+    ] <> maybe [] (\m -> ["managed_by" .= m]) (provManagedBy p)
 
 instance FromJSON Provider where
   parseJSON = withObject "Provider" $ \o -> Provider
@@ -276,6 +285,7 @@ instance FromJSON Provider where
     <*> o .:? "effort"
     <*> (map unNamedPair <$> o .:? "headers" .!= [])
     <*> o .:? "extra_body"
+    <*> o .:? "managed_by"
 
 -- ---------------------------------------------------------------------------
 -- Agents

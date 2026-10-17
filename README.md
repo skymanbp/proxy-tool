@@ -36,7 +36,7 @@ Needs [Stack](https://docs.haskellstack.org/). Everything else is pinned by
 
 ```sh
 stack build          # library, executable and tests
-stack test           # 122 examples
+stack test           # 154 examples
 stack exec proxy-tool     # run it from inside this directory
 stack install             # copy it onto PATH, so `proxy-tool` works anywhere
 ```
@@ -56,6 +56,8 @@ proxy-tool plan <agent> <provider>          show what a launch would do, and sto
 proxy-tool run  <agent> <provider>          launch the agent
 proxy-tool doctor                           check config, commands and credentials
 proxy-tool config path|show|init
+proxy-tool serve <provider> --port N --token-env NAME [--exit-on-stdin-eof]
+                                            run the proxy alone, with no agent
 
   --lang en|zh                              interface language for this run
   --route auto|direct|proxy                 override the route for one launch
@@ -67,6 +69,58 @@ without starting anything. Credentials are masked in both.
 
 Config lives in the platform config directory (`proxy-tool/config.json`);
 `PROXY_TOOL_CONFIG` overrides the path.
+
+## Serve: a standing proxy for a Claude Code started elsewhere
+
+`run` and the TUI start the proxy for one launch and stop it when the agent
+exits, on a random port with a random token. `serve` runs the same proxy on
+its own, for a program that launches Claude Code itself and only needs the
+translation — the interactive paths are unchanged.
+
+```sh
+export PROXY_TOOL_TOKEN=...            # any long random string
+proxy-tool serve venice --port 8319 --token-env PROXY_TOOL_TOKEN
+# then, anywhere: ANTHROPIC_BASE_URL=http://127.0.0.1:8319
+#                 ANTHROPIC_AUTH_TOKEN=$PROXY_TOOL_TOKEN  claude ...
+```
+
+- **Fixed port, named token.** `--port` is required (1–65535): whoever starts
+  a standing proxy finds it at a known address. The token is read from the
+  environment variable `--token-env` names and never printed; unset or empty
+  is refused with exit 2, because a standing proxy without a token would be an
+  open relay to your paid provider. Clients present it as `Authorization:
+  Bearer` or `x-api-key`; anything else gets `401`.
+- **The client speaks Anthropic Messages.** Against an OpenAI-compatible
+  provider the proxy translates; against an Anthropic-dialect provider it
+  forwards everything (except `/healthz`) unchanged.
+- **Routed by path**, instead of every request going to the chat endpoint:
+
+  | request | answer |
+  |---|---|
+  | `POST /v1/messages` | translated to the provider's `/chat/completions`, as in a launch |
+  | `POST /v1/messages/count_tokens` | a local estimate: the request's `system`, `messages` and `tools` as compact JSON, its character count (code points) divided by four, rounded up — `{"input_tokens": N}`. The provider is not asked; it has no counting endpoint, and a completion would bill a request nobody made |
+  | `GET /v1/models` | the provider's `/models`, in Anthropic's list shape; a provider that answers 404/405 there (no list endpoint) is described by its configured model alone |
+  | `GET /healthz` | `200 {"ok": true, "provider", "model", "effort", "base_url", "port", "started_at", "pid", "uptime_s"}`, no token needed; when a token is presented, `token_ok` says whether it is the right one. `model` / `effort` / `base_url` are the provider entry as it was loaded at start — the proxy forces them until it is restarted, so a supervisor compares them with the entry it wants and restarts a proxy that serves an old one. No credential is ever in it |
+  | `POST /admin/shutdown` | token required (`401` otherwise): answers `200 {"ok": true, "stopping": true}`, then stops the proxy with exit 0 — the way to stop one started detached, with no console to send Ctrl-C to |
+  | anything else | `404` |
+
+- **No retry, no fallback.** An upstream error status and its body come back
+  as they are; a provider that cannot be reached is a `502`.
+- **Stopping.** Ctrl-C, Ctrl-Break, closing the console, SIGINT and SIGTERM
+  all stop it with exit 0, and so does an authorised `POST /admin/shutdown`;
+  `proxy-tool serve-stop --port N --token-env NAME` sends that request and
+  waits until the port has gone quiet (exit 0; 1 when nothing answers, the
+  token is refused or it keeps answering; 2 for an unset token variable). `--exit-on-stdin-eof` adds end-of-stdin as a stop
+  request, for a parent that wants the proxy tied to its own lifetime; it is
+  opt-in because a parent that wants the proxy to outlive it starts it with
+  stdin on the null device, which is at end-of-file at once.
+- **One port, one proxy.** On Windows the standing proxy binds without
+  `SO_REUSEADDR`, which there would let a second copy bind the same port and
+  share its connections; a second `serve` on a port in use fails instead.
+- A provider entry may carry `"managed_by": "<program>"` — the mark of an
+  entry another program generates. It is kept through load and save, so
+  saving from the TUI does not disown it; editing the entry in the TUI form
+  takes it over (the edited entry carries no owner).
 
 ## Adding a provider
 
@@ -275,13 +329,19 @@ inferred.
 
 ## Tests
 
-`stack test` — 122 examples covering request and response translation, the
+`stack test` — 154 examples covering request and response translation, the
 streaming state machine (block boundaries, indices, tool-call assembly, the
 usage-only chunk with both token counts, truncated upstreams), SSE framing
 across chunk boundaries, config round-tripping, routing decisions, argument
-dropping, environment ownership, and the message catalogue (language parsing,
+dropping, environment ownership, the message catalogue (language parsing,
 display widths, and — for every message that takes parameters — that both
-languages keep them).
+languages keep them), and `serve`: its endpoint routing, the token estimate,
+the model-list translation, and the standing proxy end to end on loopback
+against an in-process stub provider (health with and without a token, `401`,
+translation, local `count_tokens`, model list and its no-endpoint case, error
+passthrough, `502`, a refused second bind, a clean stop, the loaded identity
+on `/healthz`, the authenticated `POST /admin/shutdown` and `serve-stop`, and
+no provider key or proxy token in any error body).
 
 Routing and warning tests assert on the *message*, not on its English wording,
 so rewording the English cannot break them and a wrong Chinese string cannot
@@ -304,8 +364,9 @@ passthrough in same-dialect mode, and an agent launched through a `.cmd` shim.
 | `ProxyTool.Config` | on-disk config, shipped defaults, lookups and edits |
 | `ProxyTool.Translate` | pure rewriting and translation, including the SSE state machine |
 | `ProxyTool.Proxy` | the loopback HTTP server |
+| `ProxyTool.ServeRoutes` | `serve`'s pure half: endpoint routing, health, token estimate, model list |
 | `ProxyTool.Launch` | planning, command resolution, process spawning |
-| `ProxyTool.Session` | brings the proxy up, runs the agent, tears down |
+| `ProxyTool.Session` | brings the proxy up, runs the agent, tears down; runs the standing proxy |
 | `ProxyTool.TUI` | the interface |
 
 Planning is pure and total, so the TUI can render exactly what is about to

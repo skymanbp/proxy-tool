@@ -17,13 +17,14 @@ module ProxyTool.Proxy
   ( ProxyConfig (..)
   , ProxyHandle (..)
   , startProxy
+  , startProxyWith
   , stopProxy
   , proxyApplication
   ) where
 
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Exception (SomeException, bracketOnError, try)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Aeson (Value (Bool, Object), decode, encode, object, (.=))
 import qualified Data.Aeson.KeyMap as KM
 import Data.ByteString (ByteString)
@@ -32,13 +33,23 @@ import Data.ByteString.Builder (Builder, byteString)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.CaseInsensitive as CI
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import GHC.Clock (getMonotonicTime)
 import qualified Network.HTTP.Client as H
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Network.HTTP.Types (Header, Status, status401, status502, statusCode)
+import Network.HTTP.Types
+  ( Header
+  , Status
+  , status200
+  , status400
+  , status401
+  , status404
+  , status502
+  , statusCode
+  )
 import Network.Socket
   ( AddrInfo (addrAddress, addrFamily, addrProtocol, addrSocketType)
   , SockAddr (SockAddrInet, SockAddrInet6)
@@ -59,6 +70,7 @@ import Network.Wai
   , Request
   , Response
   , ResponseReceived
+  , pathInfo
   , rawPathInfo
   , rawQueryString
   , requestHeaders
@@ -68,8 +80,10 @@ import Network.Wai
   , strictRequestBody
   )
 import qualified Network.Wai.Handler.Warp as Warp
+import System.Info (os)
 
 import ProxyTool.I18n
+import ProxyTool.ServeRoutes
 import ProxyTool.Translate
 import ProxyTool.Types
 
@@ -96,6 +110,16 @@ data ProxyConfig = ProxyConfig
     -- ^ Language for the diagnostics this proxy writes to the terminal.  The
     -- JSON error bodies it returns to the agent stay English: those are read
     -- by a program, not by a person.
+  , pcServe        :: Maybe ServeInfo
+    -- ^ 'Just' for a standing proxy (@proxy-tool serve@): requests are routed
+    -- by path ("ProxyTool.ServeRoutes") and @GET \/healthz@ answers.
+    -- 'Nothing' for a launched session, which forwards every request exactly
+    -- as it always has.
+  , pcRequestStop  :: IO ()
+    -- ^ Ask the process that owns this proxy to stop it.  A standing proxy
+    -- runs it for an authorised @POST \/admin\/shutdown@ (the only way to stop
+    -- one that was started detached, with no console to send Ctrl-C to); a
+    -- launched session has no such endpoint and passes @pure ()@.
   }
 
 data ProxyHandle = ProxyHandle
@@ -115,11 +139,17 @@ data ProxyHandle = ProxyHandle
 -- 'Nothing') is the default because it lets several sessions run side by
 -- side; reading the port back off an already-started server would be a race.
 startProxy :: ProxyConfig -> Maybe Int -> IO (Either Msg ProxyHandle)
-startProxy pc mport =
-  try (bindLoopback (fromMaybe 0 mport)) >>= \case
+startProxy pc = startProxyWith (const pc)
+
+-- | 'startProxy' for a configuration that depends on the port actually
+-- bound -- a standing proxy reports it from @GET \/healthz@, and with a
+-- requested port of 0 it is only known once the socket exists.
+startProxyWith :: (Int -> ProxyConfig) -> Maybe Int -> IO (Either Msg ProxyHandle)
+startProxyWith mkPc mport =
+  try (bindLoopback exclusive (fromMaybe 0 mport)) >>= \case
     Left (e :: SomeException) ->
       pure (Left (MsgProxyBindFailed (T.pack (show e))))
-    Right (sock, port) ->
+    Right (sock, port) -> let pc = mkPc port in
       try (H.newManager tlsManagerSettings
              { H.managerResponseTimeout = H.responseTimeoutNone }) >>= \case
         Left (e :: SomeException) -> do
@@ -132,13 +162,27 @@ startProxy pc mport =
           tid <- forkIO (Warp.runSettingsSocket settings sock
                            (proxyApplication mgr pc))
           pure (Right (ProxyHandle port sock tid))
+  where
+    -- Whether this is a standing proxy is a property of the configuration
+    -- and does not depend on the port, so asking with any port is exact.
+    exclusive = isJust (pcServe (mkPc 0))
 
 -- | Bind a listening socket on loopback, returning the port actually taken.
 --
 -- The address comes from 'getAddrInfo' rather than a hand-built literal, so
 -- this still works on a host that resolves loopback to IPv6.
-bindLoopback :: Int -> IO (Socket, Int)
-bindLoopback wanted = do
+--
+-- @exclusive@ leaves @SO_REUSEADDR@ off.  On Windows that option does not
+-- mean what it means on POSIX: it lets a second socket bind a port another
+-- socket is already listening on, and the two then split the connections
+-- between them.  A standing proxy has a fixed, well-known port that a
+-- supervisor may start a second copy on by mistake, so it must get
+-- \"address in use\" instead; a launched session keeps the option it always
+-- had.  On POSIX the option is kept in both cases: there it only permits
+-- rebinding past connections in TIME_WAIT, and a second listener on the same
+-- port is refused regardless.
+bindLoopback :: Bool -> Int -> IO (Socket, Int)
+bindLoopback exclusive wanted = do
   addrs <- getAddrInfo (Just defaultHints { addrSocketType = Stream })
                        (Just "127.0.0.1")
                        (Just (show wanted))
@@ -148,7 +192,7 @@ bindLoopback wanted = do
       (socket (addrFamily ai) (addrSocketType ai) (addrProtocol ai))
       close
       $ \sock -> do
-        setSocketOption sock ReuseAddr 1
+        unless (exclusive && os == "mingw32") (setSocketOption sock ReuseAddr 1)
         bind sock (addrAddress ai)
         listen sock 128
         name <- getSocketName sock
@@ -176,7 +220,110 @@ data RequestPlan = RequestPlan
   }
 
 proxyApplication :: H.Manager -> ProxyConfig -> Application
-proxyApplication mgr pc req respond
+proxyApplication mgr pc = case pcServe pc of
+  Nothing -> forwardApplication mgr pc
+  Just si -> serveApplication mgr pc si
+
+-- | A standing proxy: route by path before anything is forwarded.
+--
+-- When both ends speak the same dialect there is nothing to compute locally,
+-- so every authorised request other than the health check is forwarded
+-- as-is -- the provider answers its own token counts and model list.
+serveApplication :: H.Manager -> ProxyConfig -> ServeInfo -> Application
+serveApplication mgr pc si req respond =
+  case classifyServeRoute (requestMethod req) (pathInfo req) of
+    ServeHealthz -> do
+      now <- getMonotonicTime
+      respond $ responseLBS status200 [("content-type", "application/json")]
+              $ encode (healthzBody si now tokenVerdict)
+    _ | not (authorised pc req) ->
+          respond $ errorResponse pc status401 "authentication_error"
+            "missing or incorrect proxy token"
+    -- Answered before anything is forwarded, in either dialect: the answer is
+    -- written first, then the owner is asked to stop, so the caller learns its
+    -- request was accepted before the socket closes.
+    ServeShutdown -> do
+      pcLog pc (render (pcLang pc) MsgServeShutdownRequested)
+      rr <- respond $ responseLBS status200 [("content-type", "application/json")]
+              $ encode (object ["ok" .= True, "stopping" .= True])
+      pcRequestStop pc
+      pure rr
+    _ | not translating -> forwardApplication mgr pc req respond
+    ServeMessages    -> forwardApplication mgr pc req respond
+    ServeCountTokens -> do
+      body <- strictRequestBody req
+      respond $ case decode body >>= either (const Nothing) Just . estimateInputTokens of
+        Just n  -> responseLBS status200 [("content-type", "application/json")]
+                     (encode (countTokensBody n))
+        Nothing -> errorResponse pc status400 "invalid_request_error"
+                     "count_tokens body must be a JSON object"
+    ServeModels   -> listModels mgr pc req respond
+    ServeNotFound -> respond $ errorResponse pc status404 "not_found_error"
+      ("no such endpoint: " <> TE.decodeUtf8 (requestMethod req) <> " "
+         <> TE.decodeUtf8 (rawPathInfo req))
+  where
+    translating = pcClientWire pc /= pcUpstreamWire pc
+    -- Only a caller that presented a credential learns whether it matched;
+    -- an anonymous probe is told the proxy is up and nothing more.
+    presentedAny = any (\(k, _) -> k `elem` ["authorization", "x-api-key"])
+                       (requestHeaders req)
+    tokenVerdict = if presentedAny then Just (authorised pc req) else Nothing
+
+-- | @GET \/v1\/models@ against a provider of the other dialect: ask its
+-- @\/models@ and answer in the Anthropic list shape.
+--
+-- No retry and no substitute answer for a failure: a provider that has no
+-- list endpoint (404 / 405, 'modelListMissing') is described by the
+-- configured model alone; any other error status is passed through with its
+-- body, and a connection failure is a 502.
+listModels
+  :: H.Manager
+  -> ProxyConfig
+  -> Request
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+listModels mgr pc req respond =
+  case H.parseRequest (T.unpack (T.strip (pcUpstreamBase pc))) of
+    Nothing -> respond $ errorResponse pc status502 "invalid_request_error"
+      ("provider base URL is not a valid URL: " <> pcUpstreamBase pc)
+    Just base -> do
+      let upstream = base
+            { H.method          = "GET"
+            , H.path            = stripTrailingSlashBS (H.path base) <> "/models"
+            , H.queryString     = ""
+            , H.requestHeaders  = upstreamHeaders pc req
+            , H.requestBody     = H.RequestBodyLBS BL.empty
+            , H.responseTimeout = H.responseTimeoutNone
+            , H.redirectCount   = 0
+            , H.decompress      = const False
+            }
+      try (H.httpLbs upstream mgr) >>= \case
+        Left (e :: SomeException) -> do
+          pcLog pc (render (pcLang pc) (MsgUpstreamFailed (T.pack (show e))))
+          respond $ errorResponse pc status502 "api_error"
+            ("upstream request failed: " <> T.pack (show e))
+        Right res
+          | code >= 200 && code < 300 -> respond $
+              case decode (H.responseBody res) >>= either (const Nothing) Just
+                                                   . openAIModelsToAnthropic of
+                Just v  -> responseLBS status200 [("content-type", "application/json")]
+                             (encode v)
+                Nothing -> errorResponse pc status502 "api_error"
+                  "provider model list could not be translated"
+          | modelListMissing code -> respond $
+              responseLBS status200 [("content-type", "application/json")]
+                (encode (configuredModelList (optModel (pcOpts pc))))
+          | otherwise -> respond $
+              responseLBS (H.responseStatus res)
+                [ h | h@(k, _) <- H.responseHeaders res
+                    , CI.foldedCase k `elem` ["content-type"] ]
+                (H.responseBody res)
+          where code = statusCode (H.responseStatus res)
+
+-- | Forward one request to the provider: the whole of a launched session's
+-- proxy, and the @\/v1\/messages@ path of a standing one.
+forwardApplication :: H.Manager -> ProxyConfig -> Application
+forwardApplication mgr pc req respond
   | not (authorised pc req) =
       respond $ errorResponse pc status401 "authentication_error"
         "missing or incorrect proxy token"
@@ -207,7 +354,7 @@ proxyApplication mgr pc req respond
 authorised :: ProxyConfig -> Request -> Bool
 authorised pc req
   | T.null (pcToken pc) = True
-  | otherwise           = pcToken pc `elem` presented
+  | otherwise           = any (tokenMatches (pcToken pc)) presented
   where
     hdrs = requestHeaders req
     presented =

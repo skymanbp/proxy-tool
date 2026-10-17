@@ -27,6 +27,7 @@ library
                       ProxyTool.Config
                       ProxyTool.Launch
                       ProxyTool.Proxy
+                      ProxyTool.ServeRoutes
                       ProxyTool.Session
                       ProxyTool.Translate
                       ProxyTool.TUI
@@ -77,6 +78,10 @@ executable proxy-tool
     -- cannot encode the characters.  See withConsoleCodePage in Main.
     if os(windows)
         build-depends: Win32
+    -- @serve@ stops on SIGINT / SIGTERM.  On Windows the console events come
+    -- from base (GHC.ConsoleHandler); elsewhere the handlers need unix.
+    else
+        build-depends: unix
     default-language: GHC2021
 
 test-suite proxy-tool-test
@@ -88,14 +93,21 @@ test-suite proxy-tool-test
                       ConfigSpec
                       LaunchSpec
                       I18nSpec
+                      ServeSpec
     ghc-options:      -threaded
     build-depends:    base
                     , proxy-tool
                     , aeson
                     , bytestring
+                    , case-insensitive
                     , containers
                     , hspec
+                    , http-client
+                    , http-types
+                    , network
                     , scientific
                     , text
                     , vector
+                    , wai
+                    , warp
     default-language: GHC2021

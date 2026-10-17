@@ -113,6 +113,11 @@ catalogueSpec = describe "catalogue" $ do
   it "documents the language flag in every language's usage text" $
     mapM_ (\l -> usageText l `shouldSatisfy` T.isInfixOf "--lang") allLangs
 
+  it "documents serve and its flags in every language's usage text" $
+    mapM_ (\l -> mapM_ (\flag -> usageText l `shouldSatisfy` T.isInfixOf flag)
+                       ["proxy-tool serve", "--port", "--token-env", "--exit-on-stdin-eof"])
+          allLangs
+
   it "writes a help screen in every language" $
     mapM_ (\l -> filter (not . T.null . T.strip) (helpLines l)
                    `shouldSatisfy` ((> 5) . length))
@@ -132,7 +137,8 @@ sampled =
   , MsgNewProvider, MsgFldBaseUrl, MsgHintBaseUrl, MsgValueUnset
   , MsgErrBaseUrlRequired, MsgErrCommandRequired
   , MsgStatusSelectBoth, MsgPressEnterReturn
-  , MsgExpectedPair, MsgRouteNeedsValue, MsgLangNeedsValue
+  , MsgExpectedPair, MsgRouteNeedsValue, MsgLangNeedsValue, MsgServeExpected
+  , MsgServeStopExpected, MsgServeShutdownRequested
   , MsgDocAgents, MsgDocProviders, MsgDocAllOk, MsgDocNoCred
   ]
 
@@ -164,6 +170,12 @@ parameterisedWith =
   , (MsgExitStatus 137,                             ["137"])
   , (MsgDocNeedAttention 3,                         ["3"])
   , (MsgDocCredAvailable "env:MY_KEY",              ["env:MY_KEY"])
+  , (MsgServeBadPort "70000",                       ["70000", "--port"])
+  , (MsgServeStopDone 8319,                         ["8319"])
+  , (MsgServeStopRefused 8319,                      ["8319", "401"])
+  , (MsgServeStopFailed 8319 500,                   ["8319", "500"])
+  , (MsgServeStopUnreachable 8319,                  ["8319"])
+  , (MsgServeStopStillUp 8319,                      ["8319"])
   ]
 
 parameterised :: [Msg]
@@ -181,4 +193,5 @@ prose =
   , MsgPressEnterReturn, MsgAnyKeyReturns
   , MsgExpectedPair, MsgRouteNeedsValue
   , MsgDocAllOk, MsgDocNoCred, MsgDocAutoPort
+  , MsgServeStopped, MsgServeShutdownRequested
   ]

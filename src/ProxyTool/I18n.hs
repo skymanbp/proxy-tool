@@ -192,6 +192,10 @@ data Msg
   | MsgUnrecognisedArgs Text | MsgExpectedPair | MsgUnknownRoute Text
   | MsgRouteNeedsValue | MsgUnexpectedArg Text | MsgUnknownLang Text
   | MsgLangNeedsValue
+  | MsgServeExpected | MsgServeBadPort Text | MsgServeStopped
+  | MsgServeShutdownRequested
+  | MsgServeStopExpected | MsgServeStopDone Int | MsgServeStopRefused Int
+  | MsgServeStopFailed Int Int | MsgServeStopUnreachable Int | MsgServeStopStillUp Int
   -- doctor ---------------------------------------------------------------
   | MsgDocConfig | MsgDocRoute | MsgDocProxyPort | MsgDocAutoPort
   | MsgDocLanguage
@@ -364,6 +368,20 @@ renderEn = \case
   MsgUnexpectedArg a -> "unexpected argument: " <> a
   MsgUnknownLang l   -> "unknown language: " <> l <> " (expected en or zh)"
   MsgLangNeedsValue  -> "--lang needs a value"
+  MsgServeExpected   ->
+    "expected: serve <provider> --port N --token-env NAME [--exit-on-stdin-eof]"
+  MsgServeBadPort p  -> "--port needs a number from 1 to 65535, got " <> p
+  MsgServeStopped    -> "standing proxy stopped"
+  MsgServeShutdownRequested -> "stop requested over /admin/shutdown"
+  MsgServeStopExpected -> "expected: serve-stop --port N --token-env NAME"
+  MsgServeStopDone p -> "the standing proxy on port " <> T.pack (show p) <> " stopped"
+  MsgServeStopRefused p ->
+    "the proxy on port " <> T.pack (show p) <> " refused the token (401); nothing was stopped"
+  MsgServeStopFailed p s ->
+    "the proxy on port " <> T.pack (show p) <> " answered status " <> T.pack (show s) <> " to the stop request"
+  MsgServeStopUnreachable p -> "nothing answers on port " <> T.pack (show p)
+  MsgServeStopStillUp p ->
+    "the proxy on port " <> T.pack (show p) <> " accepted the stop request but is still answering"
 
   MsgDocConfig    -> "config      "
   MsgDocRoute     -> "route       "
@@ -569,6 +587,26 @@ renderZh = \case
   MsgUnknownLang l   ->
     "\26410\30693\35821\35328：" <> l <> "（\24212\20026 en \25110 zh）"
   MsgLangNeedsValue  -> "--lang \32570\23569\21442\25968\20540"
+  MsgServeExpected   ->
+    "\29992\27861\65306serve <provider> --port N --token-env NAME [--exit-on-stdin-eof]"
+  MsgServeBadPort p  ->
+    "--port \38656\35201 1 \21040 65535 \20043\38388\30340\25968\23383\65292\25910\21040 " <> p
+  MsgServeStopped    -> "\24120\39547\20195\29702\24050\20572\27490"
+  MsgServeShutdownRequested -> "\25910\21040 /admin/shutdown \20572\27490\35831\27714"
+  MsgServeStopExpected -> "\29992\27861\65306serve-stop --port N --token-env NAME"
+  MsgServeStopDone p ->
+    "\31471\21475 " <> T.pack (show p) <> " \19978\30340\24120\39547\20195\29702\24050\20572\27490"
+  MsgServeStopRefused p ->
+    "\31471\21475 " <> T.pack (show p)
+      <> " \19978\30340\20195\29702\19981\35748\36825\20010\20196\29260\65288\&401\65289\65292\27809\26377\20572\27490\20219\20309\19996\35199"
+  MsgServeStopFailed p s ->
+    "\31471\21475 " <> T.pack (show p)
+      <> " \19978\30340\20195\29702\23545\20572\27490\35831\27714\22238\31572\20102\29366\24577 " <> T.pack (show s)
+  MsgServeStopUnreachable p ->
+    "\31471\21475 " <> T.pack (show p) <> " \19978\27809\26377\31243\24207\24212\31572"
+  MsgServeStopStillUp p ->
+    "\31471\21475 " <> T.pack (show p)
+      <> " \19978\30340\20195\29702\25509\21463\20102\20572\27490\35831\27714\65292\20294\20173\22312\24212\31572"
 
   MsgDocConfig    -> "\37197\32622\25991\20214  "
   MsgDocRoute     -> "\36335\30001      "
@@ -638,6 +676,13 @@ usageText LangEn = T.unlines
   , "                                 launch the agent"
   , "  proxy-tool doctor              check config, commands and credentials"
   , "  proxy-tool config path|show|init"
+  , "  proxy-tool serve <provider> --port N --token-env NAME [--exit-on-stdin-eof]"
+  , "                                 run the proxy alone (no agent), for a Claude"
+  , "                                 Code started elsewhere; until Ctrl-C, or until"
+  , "                                 stdin closes with --exit-on-stdin-eof"
+  , "  proxy-tool serve-stop --port N --token-env NAME"
+  , "                                 ask the standing proxy on port N to stop"
+  , "                                 (with its token), and wait until it has"
   , ""
   , "  --lang en|zh                   interface language for this run"
   , ""
@@ -655,6 +700,11 @@ usageText LangZh = T.unlines
   , "                                 \21551\21160 agent"
   , "  proxy-tool doctor              \26816\26597\37197\32622\12289\21629\20196\19982\23494\38053"
   , "  proxy-tool config path|show|init"
+  , "  proxy-tool serve <provider> --port N --token-env NAME [--exit-on-stdin-eof]"
+  , "                                 \21482\36816\34892\20195\29702\65288\19981\21551\21160 agent\65289\65292\20379\21035\22788\21551\21160\30340 Claude Code \20351\29992"
+  , "                                 \30452\21040 Ctrl-C\65307\21152 --exit-on-stdin-eof \21017 stdin \20851\38381\26102\20063\36864\20986"
+  , "  proxy-tool serve-stop --port N --token-env NAME"
+  , "                                 \21521\31471\21475 N \19978\30340\24120\39547\20195\29702\21457\36865\24102\20196\29260\30340\20572\27490\35831\27714\65292\24182\31561\23427\36864\20986"
   , ""
   , "  --lang en|zh                   \26412\27425\36816\34892\30340\30028\38754\35821\35328"
   , ""

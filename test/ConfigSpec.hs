@@ -9,6 +9,8 @@ module ConfigSpec (spec) where
 import Data.Aeson (decode, encode, toJSON, fromJSON, Result (Success, Error))
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson (Value (String))
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
 import qualified Data.Text as T
 import Test.Hspec
@@ -68,6 +70,17 @@ roundTripSpec = describe "serialisation" $ do
           , provExtraBody = Just (KM.fromList [("cache", String "on")])
           }
     decode (encode p) `shouldBe` Just p
+
+  it "keeps a generated entry's owner mark, and writes none for an entry without one" $ do
+    -- Saving from the TUI re-encodes every provider; an owner mark dropped
+    -- there would turn a generated entry into one its generator must leave
+    -- alone.  An entry without an owner gains no key, so an existing config
+    -- saves as it did before the field existed.
+    let owned = emptyProvider { provId = "gen", provBaseUrl = "https://x"
+                              , provManagedBy = Just "nccl" }
+    decode (encode owned) `shouldBe` Just owned
+    BL.toStrict (encode (emptyProvider { provId = "mine" }))
+      `shouldSatisfy` (not . BS.isInfixOf "managed_by")
 
   it "round-trips an agent binding" $ do
     let a = mustJust "codex agent" (lookupAgent "codex")
